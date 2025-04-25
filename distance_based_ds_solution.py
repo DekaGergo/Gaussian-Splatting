@@ -100,7 +100,7 @@ def write_ply_from_points(filename, points):
         for point in points:
             ply_file.write(f"{point[0]} {point[1]} {point[2]}\n")
 
-def downsample_pointcloud(points, voxel_size):
+def downsample_pointcloud(points, voxel_size, distance_based):
     """
     Downsamples a point cloud based on adaptive voxel sizes according to absolute distance from the origin.
     Args:
@@ -112,41 +112,56 @@ def downsample_pointcloud(points, voxel_size):
     # Ensure input is a numpy array
     if isinstance(points, list):
         points = np.vstack(points)  # Convert list of arrays to a single numpy array
+    if distance_based:
+        # Compute absolute distance from the origin (vehicle coordinate system)
+        distances = np.linalg.norm(points, axis=1)
 
-    # Compute absolute distance from the origin (vehicle coordinate system)
-    distances = np.linalg.norm(points, axis=1)
+        # Determine distance-based zones
+        d_max = np.max(distances)
+        d1 = d_max / 9  # Nearest zone limit
+        d2 = d_max / 4  # Middle zone limit
 
-    # Determine distance-based zones
-    d_max = np.max(distances)
-    d1 = d_max / 8  # Nearest zone limit
-    d2 = d_max / 2  # Middle zone limit
+        # Separate points into zones
+        nearest_zone = points[distances < d1]  # No downsampling
+        middle_zone = points[(distances >= d1) & (distances < d2)]  # Downsample with voxel_size/2
+        farthest_zone = points[distances >= d2]  # Downsample with voxel_size
 
-    # Separate points into zones
-    nearest_zone = points[distances < d1]  # No downsampling
-    middle_zone = points[(distances >= d1) & (distances < d2)]  # Downsample with voxel_size/2
-    farthest_zone = points[distances >= d2]  # Downsample with voxel_size
+        def downsample(points, voxel_size):
+            """Helper function to downsample points using a given voxel size."""
+            if len(points) == 0:
+                return points
+            voxel_indices = np.floor(points / voxel_size).astype(np.int32)
+            voxel_dict = {}
+            for index, voxel in enumerate(voxel_indices):
+                voxel_key = tuple(voxel)
+                if voxel_key not in voxel_dict:
+                    voxel_dict[voxel_key] = points[index]
+            return np.array(list(voxel_dict.values()))
 
-    def downsample(points, voxel_size):
-        """Helper function to downsample points using a given voxel size."""
-        if len(points) == 0:
-            return points
+        # Apply downsampling
+        downsampled_nearest = downsample(nearest_zone, voxel_size / 1.25)
+        downsampled_middle = downsample(middle_zone, voxel_size / 1.15)
+        downsampled_farthest = downsample(farthest_zone, voxel_size)
+
+        # Combine all zones
+        final_points = np.vstack((downsampled_nearest, downsampled_middle, downsampled_farthest))
+
+        return final_points
+    else:
+        # Compute the voxel indices for each point
         voxel_indices = np.floor(points / voxel_size).astype(np.int32)
+
+        # Use a dictionary to store one point per voxel
         voxel_dict = {}
-        for index, voxel in enumerate(voxel_indices):
-            voxel_key = tuple(voxel)
+        for idx, voxel in enumerate(voxel_indices):
+            voxel_key = tuple(voxel)  # Convert to a hashable type
             if voxel_key not in voxel_dict:
-                voxel_dict[voxel_key] = points[index]
-        return np.array(list(voxel_dict.values()))
+                voxel_dict[voxel_key] = points[idx]
 
-    # Apply downsampling
-    #downsampled_nearest = downsample(nearest_zone, voxel_size / 8)
-    downsampled_middle = downsample(middle_zone, voxel_size / 2)
-    downsampled_farthest = downsample(farthest_zone, voxel_size)
+        # Collect the downsampled points
+        downsampled_points = np.array(list(voxel_dict.values()))
 
-    # Combine all zones
-    final_points = np.vstack((nearest_zone, downsampled_middle, downsampled_farthest))
-
-    return final_points
+        return downsampled_points
 def Ego2Cam_Intrinsic(index):
     # Calibration data from vehicle_calibration_info.json
     if index == 0:
@@ -220,9 +235,9 @@ def downsample_image_points(points: np.ndarray, base_grid_size: int) -> np.ndarr
     depths = points[:, 2]
     # Define depth zones
     max_depth = np.max(depths)
-    d1 = max_depth / 9  # Near
-    d2 = max_depth / 6
-    d3 = max_depth / 3  # Mid
+    d1 = max_depth / 16  # Near
+    d2 = max_depth / 9
+    d3 = max_depth / 4  # Mid
     #d4 = max_depth / 2.5
     # Create masks for each zone
     near_mask = depths < d1
@@ -245,9 +260,9 @@ def downsample_image_points(points: np.ndarray, base_grid_size: int) -> np.ndarr
         return np.array(keep_indices)
 
     # Apply adaptive downsampling
-    keep_near = downsample_zone(points[near_mask], base_grid_size // 4, np.where(near_mask)[0])
-    keep_near_mid = downsample_zone(points[near_mid_mask], base_grid_size // 2.4, np.where(near_mid_mask)[0])
-    keep_far_mid = downsample_zone(points[far_mid_mask], base_grid_size // 1.8, np.where(far_mid_mask)[0])
+    keep_near = downsample_zone(points[near_mask], base_grid_size // 2.5, np.where(near_mask)[0])
+    keep_near_mid = downsample_zone(points[near_mid_mask], base_grid_size // 2, np.where(near_mid_mask)[0])
+    keep_far_mid = downsample_zone(points[far_mid_mask], base_grid_size // 1.5, np.where(far_mid_mask)[0])
     keep_far = downsample_zone(points[far_mask], base_grid_size, np.where(far_mask)[0])
 
     # Combine and generate final mask
@@ -295,10 +310,10 @@ imageIter = 0
 worldPointsList = []
 existing3Dpoints = []
 cameraLength = 1
-lidarLength = 4
+lidarLength = 3
 imageLength = lidarLength * 3
 voxelSize = 2
-gridSize = 60 # distance based filter!!!!!!
+gridSize = 50 # distance based filter!!!!!!
 error = 0
 distanceLimit = 200
 camera_poses = open("camera_poses.txt", "w")
@@ -310,7 +325,7 @@ T_Ego2World_first = first_pose_Ego2World.transform_matrix
 
 for i in range(lidarLength):
     pcEgo = argoverseData.get_lidar(i)
-    #pcEgo_ds = downsample_pointcloud(pcEgo, voxelSize)
+    pcEgo_ds = downsample_pointcloud(pcEgo, voxelSize, True)
     pose_Ego2World = argoverseData.get_pose(i)
     T_Ego2World = pose_Ego2World.transform_matrix
     T_Ego2World[:3, 3] = T_Ego2World[:3, 3] - T_Ego2World_first[:3, 3]
@@ -320,7 +335,7 @@ for i in range(lidarLength):
     worldPointsList.append(pcWorld)
 
 pcWorld = np.vstack(worldPointsList)
-#pcWorld_ds = downsample_pointcloud(pcWorld, voxelSize)
+pcWorld_ds = downsample_pointcloud(pcWorld, voxelSize, False)
 pcWorld = np.array(pcWorld, dtype=np.float32)  # Convert points to float32
 indices = np.arange(pcWorld.shape[0], dtype=int).reshape(-1, 1) # Attach indices to points
 pcIndexed = np.hstack((indices, pcWorld)).astype(object)  # Convert to object dtype
